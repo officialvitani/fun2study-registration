@@ -676,67 +676,197 @@
     const postPaymentHiddenSections = document.querySelectorAll('.benefits-panel, .app-promo, #eventRules');
     let busy = false;
     const BRIDGE_URL = 'https://script.google.com/macros/s/AKfycbwTCuFv3xPG8T8qJuysQUXfO77-dZE9vmvBW8_f9cKqdAR0XBVWRCxv9_7fi4AAQ2c/exec?bridge=1';
+    const BRIDGE_ORIGIN = 'https://officialvitani.github.io';
     let bridgeWindow = null;
     let bridgeReady = false;
     let bridgeOpening = false;
     let bridgeSequence = 0;
     let bridgeReadyTimer = null;
+    let bridgeHandshakeTimer = null;
     const bridgePending = new Map();
     const bridgeWaiters = [];
+
     function resolveBridgeWaiters(error) {
       while (bridgeWaiters.length) {
         const waiter = bridgeWaiters.shift();
         if (error) waiter.reject(error); else waiter.resolve();
       }
     }
+
+    function stopBridgeHandshake() {
+      if (bridgeReadyTimer) {
+        window.clearTimeout(bridgeReadyTimer);
+        bridgeReadyTimer = null;
+      }
+      if (bridgeHandshakeTimer) {
+        window.clearInterval(bridgeHandshakeTimer);
+        bridgeHandshakeTimer = null;
+      }
+    }
+
+    function sendBridgeHello() {
+      if (!bridgeWindow || bridgeWindow.closed) return;
+      try {
+        // The popup may be redirected between script.google.com and
+        // script.googleusercontent.com. HELLO contains no secrets, so the
+        // destination is intentionally '*' and the popup validates event.source
+        // and the GitHub origin before responding.
+        bridgeWindow.postMessage({
+          channel: 'F2S_BRIDGE_HELLO',
+          version: '2026-10-24-popup-bridge-v2'
+        }, '*');
+      } catch (error) {
+        console.warn('[F2S_BRIDGE_HELLO_FAILED]', error);
+      }
+    }
+
     function ensureBridge() {
       if (bridgeReady && bridgeWindow && !bridgeWindow.closed) return Promise.resolve();
-      if (bridgeOpening) return new Promise(function(resolve,reject){ bridgeWaiters.push({resolve:resolve,reject:reject}); });
-      // Must be called directly from the user's submit click so mobile browsers allow the popup.
-      bridgeWindow = window.open(BRIDGE_URL, 'f2sSecurePaymentBridge', 'popup=yes,width=420,height=320');
-      if (!bridgeWindow) return Promise.reject(new Error('[F2S_POPUP_BLOCKED] Browser blocked the secure payment window. Allow pop-ups for officialvitani.github.io and retry.'));
+
+      if (bridgeOpening) {
+        return new Promise(function(resolve,reject){
+          bridgeWaiters.push({resolve:resolve,reject:reject});
+        });
+      }
+
+      bridgeReady = false;
+
+      // This function is called synchronously from the user's Pay button.
+      // Do not move window.open() into a Promise/setTimeout: mobile Chrome can
+      // then classify it as a popup and block it.
+      bridgeWindow = window.open(BRIDGE_URL, '_blank');
+
+      if (!bridgeWindow) {
+        return Promise.reject(new Error(
+          '[F2S_POPUP_BLOCKED] Browser blocked the secure payment window. ' +
+          'Allow pop-ups for officialvitani.github.io and retry.'
+        ));
+      }
+
       bridgeOpening = true;
+
       return new Promise(function(resolve,reject){
         bridgeWaiters.push({resolve:resolve,reject:reject});
+
+        // Retry the handshake because Apps Script can take a few seconds to
+        // finish its Google redirect before the Bridge.html page is ready.
+        sendBridgeHello();
+        bridgeHandshakeTimer = window.setInterval(function(){
+          if (bridgeReady || !bridgeWindow || bridgeWindow.closed) return;
+          sendBridgeHello();
+        }, 500);
+
         bridgeReadyTimer = window.setTimeout(function(){
-          if (!bridgeReady) { bridgeOpening = false; resolveBridgeWaiters(new Error('[F2S_BRIDGE_NOT_READY] Secure payment bridge did not respond. Check Apps Script deployment access and that the latest version was deployed.')); }
+          if (bridgeReady) return;
+          bridgeOpening = false;
+          stopBridgeHandshake();
+
+          if (bridgeWindow && !bridgeWindow.closed) {
+            try { bridgeWindow.close(); } catch (e) {}
+          }
+
+          resolveBridgeWaiters(new Error(
+            '[F2S_BRIDGE_NOT_READY] Secure payment bridge did not respond. ' +
+            'The Google Apps Script web-app deployment is not reachable or ' +
+            'the deployed version does not contain Bridge.html. Deploy a new ' +
+            'version with Execute as: Me and Who has access: Anyone, then retry.'
+          ));
         }, 20000);
       });
     }
+
     window.addEventListener('message', function (event) {
-      // Validate the exact popup Window reference; Apps Script may redirect across Google-owned origins.
+      // The popup Window object stays the same even when Apps Script redirects
+      // the popup between Google-owned origins, so source is the primary check.
       if (!bridgeWindow || event.source !== bridgeWindow || !event.data) return;
+
       if (event.data.channel === 'F2S_BRIDGE_READY') {
-        bridgeReady = true; bridgeOpening = false;
-        if (bridgeReadyTimer) window.clearTimeout(bridgeReadyTimer);
+        bridgeReady = true;
+        bridgeOpening = false;
+        stopBridgeHandshake();
         console.info('[F2S_BRIDGE_READY]', event.data.bridgeVersion || 'version-unspecified');
         resolveBridgeWaiters();
         return;
       }
+
       if (event.data.channel !== 'F2S_BRIDGE') return;
+
       const item = bridgePending.get(event.data.id);
-      if (!item) { console.warn('[F2S_LATE_OR_UNKNOWN_RESPONSE]', event.data.id, event.data.action || 'unknown action'); return; }
-      bridgePending.delete(event.data.id); window.clearTimeout(item.timer);
-      if (event.data.ok) { console.info('[F2S_BRIDGE_SUCCESS]', item.action, event.data.id); item.resolve(event.data.result); }
-      else { console.error('[F2S_BRIDGE_SERVER_ERROR]', event.data.errorCode || 'F2S_SERVER_ERROR', item.action, event.data.error || 'No server error details'); item.reject(new Error((event.data.errorCode ? '['+event.data.errorCode+'] ' : '') + (event.data.error || 'Secure payment request failed.'))); }
+      if (!item) {
+        console.warn('[F2S_LATE_OR_UNKNOWN_RESPONSE]', event.data.id, event.data.action || 'unknown action');
+        return;
+      }
+
+      bridgePending.delete(event.data.id);
+      window.clearTimeout(item.timer);
+
+      if (event.data.ok) {
+        console.info('[F2S_BRIDGE_SUCCESS]', item.action, event.data.id);
+        item.resolve(event.data.result);
+      } else {
+        console.error(
+          '[F2S_BRIDGE_SERVER_ERROR]',
+          event.data.errorCode || 'F2S_SERVER_ERROR',
+          item.action,
+          event.data.error || 'No server error details'
+        );
+        item.reject(new Error(
+          (event.data.errorCode ? '[' + event.data.errorCode + '] ' : '') +
+          (event.data.error || 'Secure payment request failed.')
+        ));
+      }
     });
+
     function bridgeCall(action, payload) {
-      // ensureBridge is invoked synchronously on form submit; the popup is opened before async work.
       const readyPromise = ensureBridge();
+
       return readyPromise.then(function(){
         return new Promise(function(resolve,reject){
           const id = 'f2s-' + Date.now() + '-' + (++bridgeSequence);
           const timeoutMs = 60000;
+
           const timer = window.setTimeout(function(){
-            const pending = bridgePending.get(id); if (!pending) return;
+            const pending = bridgePending.get(id);
+            if (!pending) return;
+
             bridgePending.delete(id);
-            const code = action === 'createOrder' ? 'F2S_CREATE_ORDER_TIMEOUT' : 'F2S_PAYMENT_VERIFY_TIMEOUT';
-            console.error('['+code+'] requestId='+id+' timeoutMs='+timeoutMs+' Check Apps Script → Executions.');
-            reject(new Error('['+code+'] Server did not respond within 60 seconds. Check Apps Script → Executions before retrying. If money may have been deducted, do not pay again.'));
+
+            const code = action === 'createOrder'
+              ? 'F2S_CREATE_ORDER_TIMEOUT'
+              : 'F2S_PAYMENT_VERIFY_TIMEOUT';
+
+            console.error(
+              '[' + code + '] requestId=' + id +
+              ' timeoutMs=' + timeoutMs +
+              ' Check Apps Script → Executions.'
+            );
+
+            reject(new Error(
+              '[' + code + '] Server did not respond within 60 seconds. ' +
+              'Check Apps Script → Executions before retrying. ' +
+              'If money may have been deducted, do not pay again.'
+            ));
           }, timeoutMs);
-          bridgePending.set(id,{resolve:resolve,reject:reject,timer:timer,action:action});
-          try { bridgeWindow.postMessage({channel:'F2S_BRIDGE',id:id,action:action,payload:payload||{}}, 'https://officialvitani.github.io'); }
-          catch(error){ window.clearTimeout(timer); bridgePending.delete(id); reject(new Error('[F2S_POSTMESSAGE_FAILED] Could not contact secure bridge.')); }
+
+          bridgePending.set(id,{
+            resolve:resolve,
+            reject:reject,
+            timer:timer,
+            action:action
+          });
+
+          try {
+            bridgeWindow.postMessage({
+              channel:'F2S_BRIDGE',
+              id:id,
+              action:action,
+              payload:payload || {}
+            }, BRIDGE_ORIGIN);
+          } catch(error) {
+            window.clearTimeout(timer);
+            bridgePending.delete(id);
+            reject(new Error('[F2S_POSTMESSAGE_FAILED] Could not contact secure bridge.'));
+          }
         });
       });
     }
