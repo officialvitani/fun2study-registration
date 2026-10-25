@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#171a39">
+  <title>Fun2Study Gate Entry & Check-in</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root{color-scheme:light;--navy:#151936;--purple:#5d4be8;--green:#12805c;--red:#b42318;--muted:#656b7a;--line:#e3e5ed;--bg:#f5f6fb}
+    *{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;color:var(--navy);background:var(--bg)}.wrap{width:min(720px,100%);margin:0 auto;padding:16px 13px 34px}.brand{background:linear-gradient(135deg,#171a39,#34306f);color:#fff;padding:21px;border-radius:20px;box-shadow:0 10px 26px #15193620}.eyebrow{font-size:11px;font-weight:800;letter-spacing:1.7px;text-transform:uppercase;color:#c9c4ff}h1{font-size:24px;margin:8px 0 7px}.brand p{margin:0;line-height:1.5;font-size:13px;color:#e2e3ff}.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:17px;margin-top:13px;box-shadow:0 5px 18px #15193608}h2{margin:0 0 13px;font-size:17px}label{display:block;font-size:12px;font-weight:700;color:#34394e;margin:12px 0 6px}input{width:100%;border:1px solid #cfd3e0;border-radius:11px;padding:12px 13px;font-size:15px;outline:none;background:#fff;color:var(--navy)}input:focus{border-color:var(--purple);box-shadow:0 0 0 3px #5d4be81a}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}button{appearance:none;border:0;border-radius:12px;padding:13px 15px;width:100%;margin-top:11px;font-weight:800;font-size:14px;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}.primary{color:#fff;background:var(--purple)}.success{color:#fff;background:var(--green)}.secondary{color:var(--navy);background:#eef0f8;border:1px solid #dce0ec}.reader{overflow:hidden;border:1px dashed #bfc4d5;border-radius:14px;background:#f8f9fd;min-height:90px}#reader{width:100%}.note{font-size:12px;color:var(--muted);line-height:1.55;margin:9px 0 0}.status{display:none;border-radius:13px;padding:14px;margin-top:14px;font-size:13px;line-height:1.5;overflow-wrap:anywhere}.status.info{display:block;color:#38337c;border:1px solid #d8d4ff;background:#f4f2ff}.status.ok{display:block;color:#075e43;border:1px solid #a8e6cc;background:#effbf5}.status.bad{display:block;color:#8a1c13;border:1px solid #ffcac5;background:#fff4f3}.status h3{margin:0 0 5px;font-size:16px}.footer{text-align:center;color:#85899a;font-size:11px;padding:18px 0 0}.permission{padding:12px;border-radius:12px;border:1px solid #d8d4ff;background:#f4f2ff;font-size:12px;color:#38337c;line-height:1.5;margin-top:11px}@media(max-width:420px){.row{grid-template-columns:1fr;gap:0}.brand{padding:18px}h1{font-size:22px}.card{padding:15px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="brand"><div class="eyebrow">Fun2Study · Staff Only</div><h1>Gate Entry & Check-in</h1><p>Scan a registration card on this HTTPS page. The Apps Script server verifies payment and writes entry status to Google Sheets and Firebase.</p></header>
+    <section class="card">
+      <h2>1. Guard verification</h2>
+      <div class="row"><div><label for="guardName">Guard name / Gate</label><input id="guardName" maxlength="60" autocomplete="name" placeholder="e.g. Gate A - Amit"></div><div><label for="guardPin">Guard PIN</label><input id="guardPin" type="password" inputmode="numeric" maxlength="64" autocomplete="off" placeholder="Staff PIN"></div></div>
+    </section>
+    <section class="card">
+      <h2>2. Scan registration QR</h2><div class="reader"><div id="reader"></div></div>
+      <button id="startScan" class="primary" type="button">Open Camera Scanner</button><button id="stopScan" class="secondary" type="button" disabled>Stop Scanner</button>
+      <div class="permission" id="permissionHelp">This page is HTTPS and can request camera access. Tap Open Camera Scanner, then select Allow if Chrome asks. Apps Script pages themselves cannot access the camera because of Google's iframe permissions policy.</div>
+      <label for="qrText">Scanned QR content (manual fallback)</label><input id="qrText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="F2S|RegistrationID|QRToken or FUN2STUDY-2026-00006">
+      <button id="verifyBtn" class="secondary" type="button">Verify Only — Test, No Entry Mark</button><button id="markBtn" class="success" type="button">Mark Entry + Check-in</button>
+      <div id="statusBox" class="status" role="status" aria-live="polite"></div>
+    </section>
+    <form id="backendForm" method="post" target="_self" autocomplete="off" style="display:none">
+      <input type="hidden" name="action" id="postAction"><input type="hidden" name="qrText" id="postQr"><input type="hidden" name="guardPin" id="postPin"><input type="hidden" name="guardName" id="postName">
+    </form>
+    <div class="footer">Entry Marker v2 · Do not allow quiz joining unless Google Sheets and Firebase both show CHECKED IN / ENTERED with Entry Sync Status SYNCED.</div>
+  </main>
+  <script>
+    // IMPORTANT: Replace this with the deployed URL ending in /exec for the new Entry Marker Apps Script project.
+    const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycby6US5ShbA3mX7UhZOZ0wAMVUopXLiLROmYjOrHwKUm15m6dxUvVqP-FVs1VvgyEwqH8g/exec';
+    let scanner = null, scannerRunning = false, requestBusy = false, scanHandled = false;
+    const $ = id => document.getElementById(id);
+    const val = id => $(id).value.trim();
+    function status(type,title,message,detail){const box=$('statusBox');box.className='status '+type;box.replaceChildren();const h=document.createElement('h3');h.textContent=title;box.appendChild(h);const p=document.createElement('div');p.textContent=message||'';box.appendChild(p);if(detail){const d=document.createElement('div');d.style.marginTop='7px';d.textContent=detail;box.appendChild(d)}}
+    function busy(on){requestBusy=on;['verifyBtn','markBtn','startScan'].forEach(id=>$(id).disabled=on||(id==='startScan'&&scannerRunning))}
+    function checkConfig(){if(!/^https:\/\/script\.google\.com\/macros\/s\//.test(GAS_WEB_APP_URL)||!GAS_WEB_APP_URL.endsWith('/exec'))throw new Error('Set GAS_WEB_APP_URL to the deployed Entry Marker URL ending in /exec.');if(val('guardName').length<2)throw new Error('Enter the guard name / gate.');if(val('guardPin').length<6)throw new Error('Enter the guard PIN (minimum 6 characters).');if(!val('qrText'))throw new Error('Scan a QR or enter its content first.')}
+    function submitBackend(action){try{checkConfig()}catch(e){status('bad','Missing / invalid information',e.message);return}if(requestBusy)return;if(action==='mark'&&!window.confirm('Mark this paid registration as ENTERED / CHECKED IN in Google Sheets and Firebase?'))return;busy(true);status('info',action==='mark'?'Marking entry…':'Verifying ticket…',action==='mark'?'Submitting securely to Apps Script by HTTPS POST. Please do not close this page.':'Checking QR, registration and payment status. No entry will be marked.');const form=$('backendForm');form.action=GAS_WEB_APP_URL;$('postAction').value=action;$('postQr').value=val('qrText');$('postPin').value=val('guardPin');$('postName').value=val('guardName');form.submit()}
+    async function startScanner(){if(requestBusy||scannerRunning)return;if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){status('bad','Secure camera access unavailable','Open this scanner directly from the HTTPS GitHub Pages URL in Chrome. Do not open it inside Apps Script, a preview iframe, or an in-app browser.');return}if(!window.Html5Qrcode){status('bad','Scanner library unavailable','The QR library did not load. Check internet access or use the manual QR text field.');return}try{if(!scanner)scanner=new Html5Qrcode('reader',{verbose:false});await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:240,height:240},aspectRatio:1.0},async function(decodedText){if(!decodedText||requestBusy||scanHandled)return;scanHandled=true;$('qrText').value=decodedText;await stopScanner();scanHandled=true;status('ok','QR captured','QR decoded successfully. Tap Verify Only first, then Mark Entry + Check-in after the record is confirmed.');},function(){});scannerRunning=true;scanHandled=false;$('startScan').disabled=true;$('stopScan').disabled=false;status('info','Camera active','Place the participant card QR inside the frame.')}catch(e){scannerRunning=false;$('startScan').disabled=false;$('stopScan').disabled=true;let msg=(e&&e.message)?e.message:String(e);if(e&&e.name==='NotAllowedError')msg='Camera permission denied. In Android Chrome open site settings → Camera → Allow, then reload this HTTPS page and try again. '+msg;else if(e&&e.name==='NotFoundError')msg='No camera found on this device. '+msg;else if(/permission|policy|camera is not allowed/i.test(msg))msg='The page must be opened as a top-level HTTPS GitHub Pages page, not inside Apps Script. Also allow Camera in Chrome site settings. '+msg;status('bad','Camera could not start',msg)}}
+    async function stopScanner(){if(scanner&&scannerRunning){try{await scanner.stop()}catch(e){}try{scanner.clear()}catch(e){}}scannerRunning=false;scanHandled=false;$('startScan').disabled=requestBusy;$('stopScan').disabled=true}
+    $('startScan').addEventListener('click',startScanner);$('stopScan').addEventListener('click',stopScanner);$('verifyBtn').addEventListener('click',()=>submitBackend('verify'));$('markBtn').addEventListener('click',()=>submitBackend('mark'));
+    $('qrText').addEventListener('input',()=>{if($('qrText').value.trim())scanHandled=true});
+    if(!window.isSecureContext)status('bad','HTTPS required','This page is not in a secure context. Publish it to GitHub Pages (https://...) and open that exact URL in Chrome.');
+  </script>
+</body>
+</html>
